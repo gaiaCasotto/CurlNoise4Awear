@@ -1,0 +1,94 @@
+#Houdini’s Curl Noise SOP
+
+import taichi as ti
+import math
+ti.init(arch=ti.gpu)
+
+# Window
+N = 800
+window = ti.ui.Window("Curl Noise Particles (Houdini-style)", (N, N))
+canvas = window.get_canvas()
+
+# Particle buffer
+NUM_PARTICLES = 20000
+pos = ti.Vector.field(2, dtype=ti.f32, shape=NUM_PARTICLES)
+
+vec2 = ti.types.vector(2, ti.f32)
+
+
+
+# ---------- helpers ----------
+@ti.func
+def fract(x: ti.f32) -> ti.f32:
+    return x - ti.floor(x)
+
+@ti.func
+def lerp(a: ti.f32, b: ti.f32, t: ti.f32) -> ti.f32:
+    return a * (1.0 - t) + b * t
+
+@ti.func
+def saturate1(x: ti.f32) -> ti.f32:
+    return ti.max(0.0, ti.min(1.0, x))
+
+
+
+# ---------------- noise functions ----------------
+@ti.func
+def hash21(p: vec2) -> ti.f32:
+    return fract(ti.sin(p.dot(vec2(127.1, 311.7))) * 43758.5453123)
+
+@ti.func
+def noise(p: vec2) -> ti.f32:
+    i = ti.floor(p)
+    f = p - i
+    a = hash21(i + vec2(0, 0))
+    b = hash21(i + vec2(1, 0))
+    c = hash21(i + vec2(0, 1))
+    d = hash21(i + vec2(1, 1))
+    u = f * f * (3 - 2 * f)
+    return lerp(lerp(a, b, u.x), lerp(c, d, u.x), u.y)
+
+@ti.func
+def fbm(p: vec2, octaves: int) -> ti.f32:
+    v = 0.0
+    a = 0.5
+    freq = 1.0
+    for _ in range(octaves):
+        v += a * noise(p * freq)
+        freq *= 2.0
+        a *= 0.5
+    return v
+
+# ---------------- curl field ----------------
+@ti.func
+def curl(p: vec2, t: ti.f32) -> vec2:
+    eps = 0.01
+    q = p * 0.5 + vec2(t*0.05, 0.0)  # animate input
+    dx = (fbm(q + vec2(eps, 0), 4) - fbm(q - vec2(eps, 0), 4)) / (2*eps)
+    dy = (fbm(q + vec2(0, eps), 4) - fbm(q - vec2(0, eps), 4)) / (2*eps)
+    return vec2(dy, -dx)  # divergence-free
+
+# ---------------- kernels ----------------
+@ti.kernel
+def init_particles():
+    for i in range(NUM_PARTICLES):
+        pos[i] = ti.Vector([ti.random(), ti.random()]) * 2.0 - 1.0  # [-1,1]^2
+
+@ti.kernel
+def step(t: ti.f32, dt: ti.f32):
+    for i in range(NUM_PARTICLES):
+        v = curl(pos[i]*3.0, t)
+        pos[i] += v * dt * 0.3
+        # wrap-around to keep particles inside domain
+        for k in ti.static(range(2)):
+            if pos[i][k] < -1.0: pos[i][k] += 2.0
+            if pos[i][k] > 1.0: pos[i][k] -= 2.0
+
+# ---------------- main loop ----------------
+init_particles()
+t = 0.0
+while window.running:
+    step(t, 0.016)
+    canvas.circles(pos, radius=0.003, color=(0.4, 0.7, 1.0))
+    window.show()
+    t += 0.01
