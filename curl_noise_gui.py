@@ -1,5 +1,3 @@
-#Houdini’s Curl Noise SOP
-
 import taichi as ti
 import math
 ti.init(arch=ti.gpu)
@@ -8,14 +6,13 @@ ti.init(arch=ti.gpu)
 N = 800
 window = ti.ui.Window("Curl Noise Particles (Houdini-style)", (N, N))
 canvas = window.get_canvas()
+gui = window.get_gui()  
 
 # Particle buffer
 NUM_PARTICLES = 20000
 pos = ti.Vector.field(2, dtype=ti.f32, shape=NUM_PARTICLES)
 
 vec2 = ti.types.vector(2, ti.f32)
-
-
 
 # ---------- helpers ----------
 @ti.func
@@ -29,8 +26,6 @@ def lerp(a: ti.f32, b: ti.f32, t: ti.f32) -> ti.f32:
 @ti.func
 def saturate1(x: ti.f32) -> ti.f32:
     return ti.max(0.0, ti.min(1.0, x))
-
-
 
 # ---------------- noise functions ----------------
 @ti.func
@@ -63,9 +58,9 @@ def fbm(p: vec2, octaves: int) -> ti.f32:
 @ti.func
 def curl(p: vec2, t: ti.f32) -> vec2:
     eps = 0.01
-    q = p * 0.5 + vec2(t*0.05, 0.0)  # animate input
-    dx = (fbm(q + vec2(eps, 0), 4) - fbm(q - vec2(eps, 0), 4)) / (2*eps)
-    dy = (fbm(q + vec2(0, eps), 4) - fbm(q - vec2(0, eps), 4)) / (2*eps)
+    q = p * 0.5 + vec2(t * 0.05, 0.0)  # animate input
+    dx = (fbm(q + vec2(eps, 0), 4) - fbm(q - vec2(eps, 0), 4)) / (2 * eps)
+    dy = (fbm(q + vec2(0, eps), 4) - fbm(q - vec2(0, eps), 4)) / (2 * eps)
     return vec2(dy, -dx)  # divergence-free
 
 # ---------------- kernels ----------------
@@ -75,10 +70,10 @@ def init_particles():
         pos[i] = ti.Vector([ti.random(), ti.random()]) * 2.0 - 1.0  # [-1,1]^2
 
 @ti.kernel
-def step(t: ti.f32, dt: ti.f32):
+def step_kernel(t: ti.f32, dt: ti.f32, speed: ti.f32):
     for i in range(NUM_PARTICLES):
-        v = curl(pos[i]*3.0, t)
-        pos[i] += v * dt * 0.3
+        v = curl(pos[i] * 3.0, t)
+        pos[i] += v * dt * speed
         # wrap-around to keep particles inside domain
         for k in ti.static(range(2)):
             if pos[i][k] < -1.0: pos[i][k] += 2.0
@@ -87,8 +82,19 @@ def step(t: ti.f32, dt: ti.f32):
 # ---------------- main loop ----------------
 init_particles()
 t = 0.0
+dt = 0.016     # initial value for the slider
+speed = 0.3    # also expose speed; nice to tweak interactively
+
 while window.running:
-    step(t, 0.016)
+    # --- GUI panel
+    with gui.sub_window("Controls", 0.02, 0.02, 0.30, 0.20):
+        gui.text("Simulation")
+        dt = gui.slider_float("dt (time step)", dt, 0.001, 0.050)
+        speed = gui.slider_float("speed scale", speed, 0.05, 1.00)
+        gui.text("larger dt or speed => faster motion")
+
+    step_kernel(t, dt, speed)
+
     canvas.circles(pos, radius=0.003, color=(0.4, 0.7, 1.0))
     window.show()
     t += 0.01
