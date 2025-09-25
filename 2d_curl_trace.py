@@ -1,7 +1,37 @@
 # Curl Trace (Houdini-style) in Taichi
 # - particles advected by curl noise
-# - trail buffer (ink) with decay + diffusion
+# - added trail buffer (ink) with decay + diffusion
 # - screen-space accumulation creates smooth streamlines
+
+
+"""
+PARAMETER EXPERIMENTATION:
+
+1) CALM PRESETS
+PARTICLE_SPEED = 0.18
+DT             = 0.010
+DECAY          = 0.990
+DIFFUSE        = 0.18
+SPLAT_RADIUS   = 2.2
+# in curl():
+q = p * 0.45  # remove + vec2(t*rate, t*rate) or implement slow rotation
+# fbm: fbm(q, 3)
+
+
+2) Stressed
+PARTICLE_SPEED = 0.45
+DT             = 0.022
+DECAY          = 0.88
+DIFFUSE        = 0.06
+SPLAT_RADIUS   = 0.9
+# in curl():
+q = p * 0.7 + vec2(t * 0.06, t * 0.02)  # faster drift
+# fbm: fbm(q, 5 or 6)
+# jitter: ±0.8–1.0 px in splat
+
+"""
+
+
 
 import taichi as ti
 import math, random
@@ -9,15 +39,15 @@ import math, random
 ti.init(arch=ti.gpu)
 
 # ---------------- config ----------------
-WIN            = 900                 # window size
-IMG_RES        = 1024            # resolution of the trail buffer
+WIN            = 900    # window size
+IMG_RES        = 1024   # resolution of the trail buffer
 NUM_PARTICLES  = 20000
 PARTICLE_SPEED = 0.3
 DT             = 0.016
 
-DECAY        = 0.885             # trail fade per frame (0.97..0.995; higher = longer trails)
-DIFFUSE      = 0.06         # small diffusion strength (0..~0.3)
-SPLAT_RADIUS = 1.10       # pixel radius for particle splat
+DECAY        = 0.885  #how much the ink fades each frame (1.0 = doesnt fade)
+DIFFUSE      = 0.06   # small diffusion strength (0..~0.3)
+SPLAT_RADIUS = 1.10   # pixel radius of the Gaussian splat each particle writes
 
 # ---------------- window / canvas ----------------
 window = ti.ui.Window("Curl Trace (Taichi)", (WIN, WIN))
@@ -25,15 +55,15 @@ canvas = window.get_canvas()
 gui    = window.get_gui()  
 
 # ---------------- particle buffers ----------------
-pos      = ti.Vector.field(2, dtype=ti.f32, shape=NUM_PARTICLES)
-prev_pos = ti.Vector.field(2, dtype=ti.f32, shape=NUM_PARTICLES)
+pos      = ti.Vector.field(2, dtype=ti.f32, shape=NUM_PARTICLES) # to hold the cuurent position of each particle
+prev_pos = ti.Vector.field(2, dtype=ti.f32, shape=NUM_PARTICLES) # holds the prvious position to build the trace
 
 vec2 = ti.types.vector(2, ti.f32)
 
 # ---------------- trail buffers ----------------
-ink     = ti.field(dtype=ti.f32, shape=(IMG_RES, IMG_RES))             # accumulated trails
-ink_tmp = ti.field(dtype=ti.f32, shape=(IMG_RES, IMG_RES))         # for diffusion pass
-rgb     = ti.Vector.field(3, dtype=ti.f32, shape=(IMG_RES, IMG_RES))   # display image
+ink     = ti.field(dtype=ti.f32, shape=(IMG_RES, IMG_RES))   # accumulated trails
+ink_tmp = ti.field(dtype=ti.f32, shape=(IMG_RES, IMG_RES))   # tmp buffer for diffusion pass
+rgb     = ti.Vector.field(3, dtype=ti.f32, shape=(IMG_RES, IMG_RES))   # the image i actually display
 
 # ---------- helpers ----------
 @ti.func
@@ -45,11 +75,11 @@ def lerp(a: ti.f32, b: ti.f32, t: ti.f32) -> ti.f32:
     return a * (1.0 - t) + b * t
 
 @ti.func
-def saturate1(x: ti.f32) -> ti.f32:
+def saturate1(x: ti.f32) -> ti.f32: #clamp function
     return ti.max(0.0, ti.min(1.0, x))
 
 @ti.func
-def world_to_tex(p: vec2) -> ti.Vector:  # [-1,1]^2 -> [0,RES)
+def world_to_tex(p: vec2) -> ti.Vector:  # Map world coords to texture pixel space , [-1,1]^2 -> [0,RES)
     q = (p * 0.5 + 0.5) * IMG_RES
     return q
 
@@ -96,9 +126,9 @@ def fbm(p: vec2, octaves: int) -> ti.f32:
 @ti.func
 def curl(p: vec2, t: ti.f32) -> vec2:
     eps = 0.01
-    q = p * 0.5 + vec2(t * 0.05, 0.0)  # animate input
-    dx = (fbm(q + vec2(eps, 0), 4) - fbm(q - vec2(eps, 0), 4)) / (2 * eps)
-    dy = (fbm(q + vec2(0, eps), 4) - fbm(q - vec2(0, eps), 4)) / (2 * eps)
+    q = p * 0.5 + vec2(t * 0.02, t * 0.02)  #
+    dx = (fbm(q + vec2(eps, 0), 6) - fbm(q - vec2(eps, 0), 6)) / (2 * eps)
+    dy = (fbm(q + vec2(0, eps), 6) - fbm(q - vec2(0, eps), 6)) / (2 * eps)
     return vec2(dy, -dx)  # divergence-free
 
 # ---------------- kernels ----------------
@@ -116,9 +146,14 @@ def zero_ink():
 
 @ti.kernel
 def advect_and_splat(t: ti.f32, dt: ti.f32, splat_r: ti.f32):
+    """
+    This kernel does everything per particle: integrate position, then draw a short anti-aliased segment 
+    into the ink buffer by laying down small Gaussian discs along the segment. 
+    The jitter helps avoid grid patterns
+    """
     for i in range(NUM_PARTICLES):
         p = pos[i]
-        v = curl(p * 3.0, t)
+        v = curl(p * 8.0, t)
         prev_pos[i] = p
         p += v * dt * PARTICLE_SPEED
 
@@ -145,7 +180,7 @@ def advect_and_splat(t: ti.f32, dt: ti.f32, splat_r: ti.f32):
             cx = lerp(ax, bx, tt)
             cy = lerp(ay, by, tt)
             #Randomize splat center slightly each frame to avoid systematic aliasing (grid pattern)
-            cx += (ti.random(ti.f32) - 0.5) * 0.5
+            cx += (ti.random(ti.f32) - 0.5) * 0.5 
             cy += (ti.random(ti.f32) - 0.5) * 0.5
 
             # compute pixel bounds for splat

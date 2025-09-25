@@ -58,7 +58,8 @@ def fbm(p: vec2, octaves: int) -> ti.f32:
 @ti.func
 def curl(p: vec2, t: ti.f32) -> vec2:
     eps = 0.01
-    q = p * 0.5 + vec2(t * 0.05, 0.0)  # animate input
+    # q = p # static motion 
+    q = p * 0.5 + vec2(t * 0.02, t * 0.02)  # translate field 
     dx = (fbm(q + vec2(eps, 0), 4) - fbm(q - vec2(eps, 0), 4)) / (2 * eps)
     dy = (fbm(q + vec2(0, eps), 4) - fbm(q - vec2(0, eps), 4)) / (2 * eps)
     return vec2(dy, -dx)  # divergence-free
