@@ -5,14 +5,8 @@ import taichi as ti
 import math
 ti.init(arch=ti.gpu)
 
-# Window
-N = 800
-window = ti.ui.Window("Curl Noise Particles (Houdini-style)", (N, N))
-canvas = window.get_canvas()
-gui = window.get_gui()  
-
-# Particle buffer
-NUM_PARTICLES = 20000
+N = 800  # Window size
+NUM_PARTICLES = 20000 # Particle buffer
 pos = ti.Vector.field(2, dtype=ti.f32, shape=NUM_PARTICLES)
 
 vec2 = ti.types.vector(2, ti.f32)
@@ -110,25 +104,58 @@ def main():
         eeg_available = False
         feeder = None; clf = None
 
-    
+    window = ti.ui.Window("Curl Noise Particles (Houdini-style)", (N, N))
+    canvas = window.get_canvas()
+    gui = window.get_gui()  
 
     init_particles()
 
-    outer_steps = 0
     last_time = time.perf_counter()
 
     t     = 0.0
-    dt    = 0.016     # initial value for the slider
-    speed = 0.30    # also expose speed; nice to tweak interactively
+    dt    = 0.016         # initial value for the slider
+    speed       = 0.30    # also expose speed; nice to tweak interactively
+    speed_scale = 1.00
+    speed_tau   = 4.0     # Smoothing time constant (seconds) for speed transitions
+    """
+    color_tau (slower/faster fade)
+    gamma_col (how “linear” the transition feels)
+    """
+
+    # Target speeds per state (before scale)
+    SPEED_BY_STATE = {
+        "CALM":           0.18,
+        "MOD-STRESS":     0.25,
+        "HIGH-STRESS":    0.35,
+        "EXTREME-STRESS": 0.50,
+    }
+
+    AGIT_BY_STATE = {
+        "CALM":           0.00,
+        "MOD-STRESS":     0.35,
+        "HIGH-STRESS":    0.70,
+        "EXTREME-STRESS": 1.00,
+    }
+
+    BLUE_CALM =  (0.4, 0.7, 1.0)
+    RED_STRESS = (0.95, 0.10, 0.10)
+    # Color smoothing
+    agitation = 0.0     # current smoothed agitation (0..1)
+    color_tau = 6.0     # seconds; bigger = slower color change
+    gamma_col = 1.3     # perceptual shaping (>1 = gentler near calm)
 
     while window.running:
-        outer_steps += 1
-
         # --- GUI panel
         with gui.sub_window("Controls", 0.02, 0.02, 0.30, 0.20):
             gui.text("Simulation")
-            dt = gui.slider_float("dt (time step)", dt, 0.001, 0.080)
-            speed = gui.slider_float("speed scale", speed, 0.05, 1.00)
+            dt          = gui.slider_float("dt (time step)", dt,          0.001, 0.080)
+            speed_scale = gui.slider_float("speed scale",    speed_scale, 0.20, 2.00)
+            speed_tau   = gui.slider_float("speed tau (s)",  speed_tau,   0.5, 10.0)
+
+            gui.text("Color transition")
+            color_tau = gui.slider_float("color tau (s)", color_tau, 0.5, 15.0)
+            gamma_col = gui.slider_float("color gamma", gamma_col, 0.6, 3.0)
+
 
         state = "CALM"
 
@@ -136,24 +163,43 @@ def main():
         state, ratio, changed = clf.update(feeder.get_buffer())
         now = time.perf_counter()
 
-        if state == "CALM":
-            speed = 0.18
-        elif state == "MOD-STRESS":
-           
-            speed = 0.25
-        elif state == "HIGH-STRESS":
-            speed = 0.35
-        else: #"EXTREME-STRESS"
-            speed = 0.5
+        # --- compute target speed from state ---
+        target_base  = SPEED_BY_STATE.get(state, 0.25)
+        target_speed = target_base * speed_scale
 
-        #gui.text(f"Live stream on :{args.port}")
-        gui.text(f"HF/LF: {ratio:.3f}  |  State: {state}")
+        now = time.perf_counter()
+        dt_wall = now - last_time
+        last_time = now
+        # alpha = 1 - exp(-dt/tau): robust to varying FPS
+        alpha = 1.0 - math.exp(-max(0.0, dt_wall) / max(1e-6, speed_tau))
+        speed += (target_speed - speed) * alpha
+
+
+        # --- color target from state, then time-based smoothing ---
+        target_agit = AGIT_BY_STATE.get(state, 0.35)
+        alpha_c = 1.0 - math.exp(-max(0.0, dt_wall) / max(1e-6, color_tau))
+        agitation += (target_agit - agitation) * alpha_c
+
+        # Perceptual shaping (optional)
+        a = agitation ** gamma_col
+
+        # Mix BLUE → RED
+        color_rgb = (
+            BLUE_CALM[0] * (1 - a) + RED_STRESS[0] * a,
+            BLUE_CALM[1] * (1 - a) + RED_STRESS[1] * a,
+            BLUE_CALM[2] * (1 - a) + RED_STRESS[2] * a,
+        )
 
         #----- render -----
         step_kernel(t, dt, speed)
-        canvas.circles(pos, radius=0.003, color=(0.4, 0.7, 1.0))
+        canvas.circles(pos, radius=0.003, color=color_rgb)
         window.show()
         t += 0.01
+
+        # (optional) small readout
+        with gui.sub_window("Readout", 0.70, 0.02, 0.27, 0.12):
+            gui.text(f"State: {state}  |  HF/LF: {ratio:.3f}" if ratio == ratio else f"State: {state}")
+            gui.text(f"target_speed: {target_speed:.3f}  ->  speed: {speed:.3f}")
 
 
 
