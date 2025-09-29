@@ -42,6 +42,23 @@ print("available emails ", available_emails)
 email = available_emails[0]
 print("only email: ", email)
 
+
+def plot_waveform(df):
+    ''' ---------- to plot waveform segment ------------'''
+    if not df.empty:
+        from awear_neuroscience.utils.plot_utils import plot_eeg_waveform_matplotlib
+
+        visualize = input("\nVisualize waveform? (y/n): ").strip().lower()
+        if visualize in ['y', 'yes']:
+            # Plot one segment
+            #plot_eeg_waveform(long_df, segment_id="seg_0")
+            plot_eeg_waveform_matplotlib(df, segment_id="seg_0")
+        else:
+            print("Skipping visualization.")
+    else:
+        print("No data to visualize.")
+
+
 def get_past_data(delta_hours):
     now = datetime.now()
     time_ranges = [(now - timedelta(hours=delta_hours), now)]
@@ -59,38 +76,18 @@ def get_past_data(delta_hours):
     print(f"Retrieved {len(raw_records)} raw records.")
 
 
-    compact_df = process_eeg_records(raw_records)
-    print(f"compt Processed DataFrame shape: {compact_df.shape}")
-    compact_df.head()
-    print(compact_df.columns.tolist())
-
-
     long_df = process_eeg_records(raw_records, return_long=True)
     print(f"long Processed DataFrame shape: {long_df.shape}, {long_df.shape[0]//256}")
     long_df.head()
     print(long_df.columns.tolist())
     print("XXxxxxxxxxxxx\n" , long_df)
 
-    print("compact : ", compact_df['focus_type'].unique())
     print("long : " , long_df['focus_type'].unique())
 
     with pd.option_context('display.max_columns', None):
         print("first line : \n",long_df.head(1))
 
-    ''' ---------- to plot waveform segment ------------
-    if not long_df.empty:
-        from awear_neuroscience.utils.plot_utils import plot_eeg_waveform, plot_eeg_waveform_matplotlib
-
-        visualize = input("\nVisualize waveform? (y/n): ").strip().lower()
-        if visualize in ['y', 'yes']:
-            # Plot one segment
-            #plot_eeg_waveform(long_df, segment_id="seg_0")
-            plot_eeg_waveform_matplotlib(long_df, segment_id="seg_0")
-        else:
-            print("Skipping visualization.")
-    else:
-        print("No data to visualize.")
-    '''
+    #plot_waveform(long_df)
 
     # Build a flat, time-ordered sample array from long_df
     ordered     = long_df.sort_values(["segment", "time_sample"], kind="mergesort")
@@ -121,10 +118,6 @@ def main():
     url = f"http://{args.host}:{args.port}/ingest"
     print(f"Streaming to {url} at fs={args.fs} Hz, chunk={args.chunk} samples... (Ctrl-C to stop)")
 
-
-    # Profile configuration
-    #profile = demo_profile_segments() if args.demo_profile else [(float("inf"), float(np.clip(args.fixed_hf, 0.0, 1.0)))]
-    #mode = "demo" if args.demo_profile else "fixed"
 
     samples_all = get_past_data(40)
     # Real-time pacing

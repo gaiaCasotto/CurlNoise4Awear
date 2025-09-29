@@ -18,9 +18,6 @@ def load_eeg_file(path: str) -> np.ndarray:
         arr -= np.mean(arr)
     return arr
 
-#need to leggere un stream e non un file. Quindi leggi finchè non finisce il data
-
-
 
 class OfflineEEGFeeder:
     def __init__(self, paths, fs=256.0, chunk=32, speed=1.0, loop=True, buffer_s=8.0):
