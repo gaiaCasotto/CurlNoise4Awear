@@ -1,37 +1,5 @@
-# Curl Trace (Houdini-style) in Taichi
-# - particles advected by curl noise
-# - added trail buffer (ink) with decay + diffusion
-# - screen-space accumulation creates smooth streamlines
-
-
-"""
-PARAMETER EXPERIMENTATION:
-
-1) CALM PRESETS
-PARTICLE_SPEED = 0.18
-DT             = 0.010
-DECAY          = 0.990
-DIFFUSE        = 0.18
-SPLAT_RADIUS   = 2.2
-# in curl():
-q = p * 0.45  # remove + vec2(t*rate, t*rate) or implement slow rotation
-# fbm: fbm(q, 3)
-
-
-2) Stressed
-PARTICLE_SPEED = 0.45
-DT             = 0.022
-DECAY          = 0.88
-DIFFUSE        = 0.06
-SPLAT_RADIUS   = 0.9
-# in curl():
-q = p * 0.7 + vec2(t * 0.06, t * 0.02)  # faster drift
-# fbm: fbm(q, 5 or 6)
-# jitter: ±0.8–1.0 px in splat
-
-"""
-
-
+# Curl Trace in Taichi
+# - trying out tetranoise function #inspired from https://www.shadertoy.com/view/mlsSWH
 
 import taichi as ti
 import math, random
@@ -59,6 +27,7 @@ pos      = ti.Vector.field(2, dtype=ti.f32, shape=NUM_PARTICLES) # to hold the c
 prev_pos = ti.Vector.field(2, dtype=ti.f32, shape=NUM_PARTICLES) # holds the prvious position to build the trace
 
 vec2 = ti.types.vector(2, ti.f32)
+vec3 = ti.types.vector(3, ti.f32)
 
 # ---------------- trail buffers ----------------
 ink     = ti.field(dtype=ti.f32, shape=(IMG_RES, IMG_RES))   # accumulated trails
@@ -79,6 +48,10 @@ def saturate1(x: ti.f32) -> ti.f32: #clamp function
     return ti.max(0.0, ti.min(1.0, x))
 
 @ti.func
+def clamp1(x: ti.f32, a: ti.f32, b: ti.f32) -> ti.f32:
+    return ti.max(a, ti.min(b, x))
+
+@ti.func
 def world_to_tex(p: vec2) -> ti.Vector:  # Map world coords to texture pixel space , [-1,1]^2 -> [0,RES)
     q = (p * 0.5 + 0.5) * IMG_RES
     return q
@@ -95,10 +68,36 @@ def splat_gaussian(px: ti.i32, py: ti.i32, cx: ti.f32, cy: ti.f32, radius: ti.f3
     w = ti.exp(-r2 / (2.0 * sig2))
     ti.atomic_add(ink[px, py], amp * w)
 
+@ti.func
+def step1(edge: ti.f32, x: ti.f32) -> ti.f32:
+    # GLSL step(edge, x): 0 if x < edge else 1
+    return 0.0 if x < edge else 1.0
+
+@ti.func
+def step_vec(edge: vec3, x: vec3) -> vec3:
+    return vec3(step1(edge.x, x.x), step1(edge.y, x.y), step1(edge.z, x.z))
+
+
 # ---------------- noise functions ----------------
 @ti.func
 def hash21(p: vec2) -> ti.f32:
     return fract(ti.sin(p.dot(vec2(127.1, 311.7))) * 43758.5453123)
+
+@ti.func
+def hash33(p: vec3) -> vec3:
+    """
+    Hash 3D -> 3D. Produces a pseudo-random *unit* vector per lattice point
+    (used as gradient dir like in simplex). Deterministic and kernel-safe.
+    """
+    # mix different dot bases to decorrelate channels
+    qx = ti.sin(p.dot(vec3(127.1, 311.7,  74.7))) * 43758.5453
+    qy = ti.sin(p.dot(vec3(269.5, 183.3, 246.1))) * 43758.5453
+    qz = ti.sin(p.dot(vec3(113.5, 271.9, 124.6))) * 43758.5453
+    v  = vec3(fract(qx), fract(qy), fract(qz)) * 2.0 - 1.0  # [-1,1]
+    # normalize (avoid div by zero)
+    eps = 1e-6
+    inv = 1.0 / ti.max(eps, ti.sqrt(v.dot(v)))
+    return v * inv
 
 @ti.func
 def noise(p: vec2) -> ti.f32:
@@ -112,6 +111,56 @@ def noise(p: vec2) -> ti.f32:
     return lerp(lerp(a, b, u.x), lerp(c, d, u.x), u.y)
 
 @ti.func
+def tetranoise(p: vec3) -> ti.f32:
+    #Returns ~[0,1]
+    # Skew to simplex lattice 
+    s = (p.x + p.y + p.z) * (1.0 / 3.0)
+    i = vec3(ti.floor(p.x + s), ti.floor(p.y + s), ti.floor(p.z + s))
+    t = (i.x + i.y + i.z) * (1.0 / 6.0)
+    p = vec3(p.x - (i.x - t), p.y - (i.y - t), p.z - (i.z - t))
+
+    # Determine simplex/tetrahedron via partition planes
+    i1 = step_vec(vec3(p.y, p.z, p.x), p)                 # step(p.yzx, p)
+    i2 = vec3(ti.max(i1.x, 1.0 - i1.z),
+              ti.max(i1.y, 1.0 - i1.x),
+              ti.max(i1.z, 1.0 - i1.y))                   # max(i1, 1 - i1.zxy)
+    i1 = vec3(ti.min(i1.x, 1.0 - i1.z),
+              ti.min(i1.y, 1.0 - i1.x),
+              ti.min(i1.z, 1.0 - i1.y))                   # min(i1, 1 - i1.zxy)
+
+    # Offsets to the other corners in skewed space
+    p1 = p - i1 + vec3(1.0/6.0, 1.0/6.0, 1.0/6.0)
+    p2 = p - i2 + vec3(1.0/3.0, 1.0/3.0, 1.0/3.0)
+    p3 = p - vec3(0.5, 0.5, 0.5)
+
+    # Squared distances and falloff
+    d0 = p.dot(p)
+    d1 = p1.dot(p1)
+    d2 = p2.dot(p2)
+    d3 = p3.dot(p3)
+    v0 = ti.max(0.5 - d0, 0.0)
+    v1 = ti.max(0.5 - d1, 0.0)
+    v2 = ti.max(0.5 - d2, 0.0)
+    v3 = ti.max(0.5 - d3, 0.0)
+
+    # Gradient dot products at corners
+    g0 = hash33(i)               # i is a lattice corner in skewed coords
+    g1 = hash33(i + i1)
+    g2 = hash33(i + i2)
+    g3 = hash33(i + vec3(1.0, 1.0, 1.0))
+    d = vec3(p.dot(g0), p1.dot(g1), p2.dot(g2))  # first 3
+    d4 = p3.dot(g3)
+
+    # Combine (v^3 * 8) like your GLSL; scale and bias into [0,1]
+    w0 = v0 * v0 * v0 * 8.0
+    w1 = v1 * v1 * v1 * 8.0
+    w2 = v2 * v2 * v2 * 8.0
+    w3 = v3 * v3 * v3 * 8.0
+    n = d.x * w0 + d.y * w1 + d.z * w2 + d4 * w3
+    return clamp1(n * 1.732 + 0.5, 0.0, 1.0)
+
+
+@ti.func
 def fbm(p: vec2, octaves: int) -> ti.f32:
     v = 0.0
     a = 0.5
@@ -122,6 +171,26 @@ def fbm(p: vec2, octaves: int) -> ti.f32:
         a *= 0.5
     return v
 
+# ---------------- fBm (3D) ----------------
+@ti.func
+def fbm3(p: vec3, octaves: ti.i32) -> ti.f32:
+    # Your GLSL used 3 octaves with offsets cycling yzx
+    n = 0.0
+    s = 0.0
+    amp = 1.0
+    offs = vec3(0.0, 0.23, 0.07)
+    # fixed 3 octaves to match the original; you can also loop by octaves
+    for k in range(3):
+        # freq doubling via exp2(k)
+        freq = ti.pow(2.0, ti.cast(k, ti.f32))
+        n += tetranoise(p * freq + offs.x) * amp
+        s += amp
+        amp *= 0.5
+        # cycle offsets (yzx)
+        offs = vec3(offs.y, offs.z, offs.x)
+    return n / s
+
+
 # ---------------- curl field ----------------
 @ti.func
 def curl(p: vec2, t: ti.f32) -> vec2:
@@ -130,6 +199,46 @@ def curl(p: vec2, t: ti.f32) -> vec2:
     dx = (fbm(q + vec2(eps, 0), 4) - fbm(q - vec2(eps, 0), 4)) / (2 * eps)
     dy = (fbm(q + vec2(0, eps), 4) - fbm(q - vec2(0, eps), 4)) / (2 * eps)
     return vec2(dy, -dx)  # divergence-free
+
+@ti.func
+def curl_from_tetra(p_xy: vec2, t: ti.f32, scale: ti.f32) -> vec2:
+    eps = 0.01
+    qx = p_xy * scale
+    # scalar field φ(x, y, t) = fbm3([x, y, t], 3)
+    f_x1 = fbm3(vec3(qx.x + eps, qx.y, t), 3)
+    f_x0 = fbm3(vec3(qx.x - eps, qx.y, t), 3)
+    f_y1 = fbm3(vec3(qx.x, qx.y + eps, t), 3)
+    f_y0 = fbm3(vec3(qx.x, qx.y - eps, t), 3)
+    dfx = (f_x1 - f_x0) / (2.0 * eps)
+    dfy = (f_y1 - f_y0) / (2.0 * eps)
+    # 2D curl of scalar potential -> divergence-free vector
+    return vec2(dfy, -dfx)
+
+
+# ---------------- flow(p, t) ----------------
+@ti.func
+def rot2(a: ti.f32) -> ti.Matrix:
+    c, s = ti.cos(a), ti.sin(a)
+    return ti.Matrix([[c, -s],
+                      [s,  c]])
+
+@ti.func
+def flow3(p: vec3, t: ti.f32, longer: ti.i32) -> ti.f32:
+    """
+    Port of your flow() with iTime -> t (seconds), LONGER as a flag.
+    Returns fBm(...) value in [0,1].
+    """
+    # Emulate moving toward sphere surface
+    p = vec3(p.x, p.y, p.z - 0.5 * p.dot(p))
+    # rotate XY slowly
+    R = rot2(t / 16.0)
+    xy = R @ vec2(p.x, p.y)
+    p = vec3(xy.x, xy.y, p.z)
+    # slice speed
+    z_add = 0.1 if longer != 0 else 0.15
+    p = vec3(p.x, p.y, p.z + z_add * t)
+    # sample fBm
+    return fbm3(p * 1.5, 3)
 
 # ---------------- kernels ----------------
 @ti.kernel
@@ -153,7 +262,7 @@ def advect_and_splat(t: ti.f32, dt: ti.f32, splat_r: ti.f32):
     """
     for i in range(NUM_PARTICLES):
         p = pos[i]
-        v = curl(p * 3.0, t)
+        v = curl_from_tetra(pos[i], t, 3.0)
         prev_pos[i] = p
         p += v * dt * PARTICLE_SPEED
 

@@ -22,6 +22,7 @@ sys.path.insert(0, "./src")
 print("path: ", sys.path)
 #to make it find awear_neuroscience folder
 from awear_neuroscience.data_extraction.firestore_loader import query_eeg_data, process_eeg_records
+from awear_neuroscience.pipeline.preprocess import process_long_df, extract_features_from_long_df, process_features
 
 cred = credentials.Certificate(os.getenv("GOOGLE_APPLICATION_CREDENTIALS"))
 firebase_admin.initialize_app(cred)
@@ -82,7 +83,23 @@ def get_past_data(delta_hours):
     print(long_df.columns.tolist())
     print("XXxxxxxxxxxxx\n" , long_df)
 
+    ALPHA = 0.05
+    SAMPLING_RATE = 256.0
+    # Transform raw records into a DataFrame
+    long_df = process_eeg_records(raw_records, return_long=True)
+    
+
+    # Apply segment-wise filtering and artifacts detection
+    #long_df     = process_long_df(long_df,SAMPLING_RATE, artifacts_detection_method='amplitude')
+    print("HERE 1")
+    #features_df = extract_features_from_long_df(long_df, SAMPLING_RATE)
+    print("HERE 2")
+    #features_df = process_features(features_df, ALPHA)
+    print("HERE 3")
+
     print("long : " , long_df['focus_type'].unique())
+    #print("FEATURES: ", features_df)
+
 
     with pd.option_context('display.max_columns', None):
         print("first line : \n",long_df.head(1))
@@ -106,7 +123,7 @@ def main():
     ap.add_argument("--port",         type=int,   default=5000,        help="Flask server port")
     ap.add_argument("--fs",           type=float, default=256.0,       help="Sample rate (Hz)")
     ap.add_argument("--chunk",        type=int,   default=64,          help="Samples per POST")
-    ap.add_argument("--duration",     type=float, default=60.0,        help="Seconds to stream (<=0 = infinite)")
+    ap.add_argument("--duration",     type=float, default=600.0,       help="Seconds to stream (<=0 = infinite)")
     ap.add_argument("--noise-std",    type=float, default=0.05,        help="Gaussian noise std dev")
     ap.add_argument("--lf-freq",      type=float, default=10.0,        help="Low-frequency tone (Hz)")
     ap.add_argument("--hf-freq",      type=float, default=25.0,        help="High-frequency tone (Hz)")
@@ -119,7 +136,7 @@ def main():
     print(f"Streaming to {url} at fs={args.fs} Hz, chunk={args.chunk} samples... (Ctrl-C to stop)")
 
 
-    samples_all = get_past_data(40)
+    samples_all = get_past_data(800)
     # Real-time pacing
     chunk_period = args.chunk / args.fs  # seconds per chunk
     next_send = time.perf_counter() + chunk_period
