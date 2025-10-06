@@ -1,24 +1,22 @@
-""""-------------- ADDING EEG INPUT --------------- """
-
-# Curl Trace in Taichi,
+# Curl Trace in Taichi
 # - trying out tetranoise function #inspired from https://www.shadertoy.com/view/mlsSWH
 
 import taichi as ti
-import numpy as np
-
+import math, random
 
 ti.init(arch=ti.gpu)
 
 # ---------------- config ----------------
-WIN            = 800    # window size
+WIN            = 900    # window size
 IMG_RES        = 1024   # resolution of the trail buffer
 NUM_PARTICLES  = 20000
-PARTICLE_SPEED = 0.15 #fix this mess
+PARTICLE_SPEED = 0.3
+DT             = 0.016
 
 DECAY        = 0.885  #how much the ink fades each frame (1.0 = doesnt fade)
 DIFFUSE      = 0.06   # small diffusion strength (0..~0.3)
 SPLAT_RADIUS = 1.10   # pixel radius of the Gaussian splat each particle writes
-
+ 
 # ---------------- particle buffers ----------------
 pos      = ti.Vector.field(2, dtype=ti.f32, shape=NUM_PARTICLES) # to hold the cuurent position of each particle
 prev_pos = ti.Vector.field(2, dtype=ti.f32, shape=NUM_PARTICLES) # holds the prvious position to build the trace
@@ -73,6 +71,7 @@ def step1(edge: ti.f32, x: ti.f32) -> ti.f32:
 @ti.func
 def step_vec(edge: vec3, x: vec3) -> vec3:
     return vec3(step1(edge.x, x.x), step1(edge.y, x.y), step1(edge.z, x.z))
+
 
 # ---------------- noise functions ----------------
 @ti.func
@@ -170,7 +169,7 @@ def fbm(p: vec2, octaves: int) -> ti.f32:
 # ---------------- fBm (3D) ----------------
 @ti.func
 def fbm3(p: vec3, octaves: ti.i32) -> ti.f32:
-    #  GLSL used 3 octaves with offsets cycling yzx
+    # Your GLSL used 3 octaves with offsets cycling yzx
     n = 0.0
     s = 0.0
     amp = 1.0
@@ -294,6 +293,8 @@ def advect_and_splat(t: ti.f32, dt: ti.f32, splat_r: ti.f32):
                     if 0 <= px < IMG_RES and 0 <= py < IMG_RES:
                         splat_gaussian(px, py, cx, cy, splat_r, amp / ti.cast(steps, ti.f32))
 
+
+
 @ti.kernel
 def decay_and_diffuse(decay: ti.f32):
     # simple decay
@@ -322,38 +323,25 @@ def tonemap():
         # color ramp: dark->blue->cyan->white
         rgb[i, j] = ti.Vector([0.2 * v, 0.6 * v + 0.2 * v * v, v])
 
-render_image = ti.Vector.field(3, dtype=ti.f32, shape=(WIN, WIN))
+# ---------------- main loop ----------------
 
-@ti.kernel
-def clear_to_blue():
-    for i, j in render_image:
-        # gentle blue; tweak if you want
-        render_image[i, j] = ti.Vector([0.05, 0.10, 0.60])
-
-# ---------------- main loop with EEG input from firebase ----------------
+import numpy as np
 import argparse
 import time
-from eeg_filereader import LiveArousalClassifier, LiveEEGStreamFeeder      
-
-from flask_app import make_app, start_server
+from eeg_filereader import OfflineEEGFeeder, LiveArousalClassifier
 
 
-#----------------- for smooth continuous mapping of particle speed -----------------
 def smoothstep01(x: float) -> float:
     # cubic smoothstep in [0,1]
     return x*x*(3.0 - 2.0*x)
 
+#failed experiment....
 def map_ratio_to_speed(ratio: float,
                        r_min: float = 0.1,   # ratio giving min speed
                        r_max: float = 2.0,   # ratio giving max speed (your “EXTREME-STRESS” boundary)
-                       v_min: float = 0.016, # min speed at r_min
+                       v_min: float = 0.006, # min speed at r_min
                        v_max: float = 0.050  # max speed at r_max (matches your dict)
                        ) -> float:
-    """
-    Log-space mapping with smoothstep:
-      - compresses very large ratios (more perceptual)
-      - gentle near endpoints
-    """
     # guard
     if not np.isfinite(ratio) or ratio <= 0:
         return v_min
@@ -363,11 +351,12 @@ def map_ratio_to_speed(ratio: float,
     x = smoothstep01(x)
     return v_min + (v_max - v_min) * x
 
+
 def map_ratio_to_dt(ratio: float,
-                       r_min: float = 1.0,   # ratio giving min speed
-                       r_max: float = 20.0,   # ratio giving max speed (your “EXTREME-STRESS” boundary)
-                       dt_min: float = 0.0001, # min speed at r_min
-                       dt_max: float = 0.020  # max speed at r_max (matches your dict)
+                       r_min: float = 0.1,   # ratio giving min speed
+                       r_max: float = 10.0,   # ratio giving max speed (your “EXTREME-STRESS” boundary)
+                       dt_min: float = 0.016, # min speed at r_min
+                       dt_max: float = 0.050  # max speed at r_max (matches your dict)
                        ) -> float:
     """
     Log-space mapping with smoothstep:
@@ -384,6 +373,7 @@ def map_ratio_to_dt(ratio: float,
     return dt_min + (dt_max - dt_min) * x
 
 
+
 def exp_smooth(current: float, target: float, real_dt: float, tau: float) -> float:
     """One-pole low-pass toward target with time-constant tau (seconds)."""
     if tau <= 0.0:
@@ -392,61 +382,42 @@ def exp_smooth(current: float, target: float, real_dt: float, tau: float) -> flo
     return current + (target - current) * k
 
 
-
-# ===================== MAIN PROCESS =============
-
 def main():
+
     parser = argparse.ArgumentParser()
-    parser.add_argument("--port",     type=int, default=5000,      help="Flask server port")
-    parser.add_argument("--host",     type=str, default="0.0.0.0", help="Flask bind host")
-    
+    parser.add_argument("--eeg", action="append", help="Path to EEG .txt file (can repeat)", default=None)
     args = parser.parse_args()
 
     # ---------- EEG setup ----------
-    EEG_FS   = 256.0
-    BUFFER_S = 8.0 #buffer_s is the seconds of history to keep in memory
-    WIN_S    = 4.0
-    feeder = LiveEEGStreamFeeder(fs=EEG_FS, buffer_s=BUFFER_S)
-    clf    = LiveArousalClassifier(fs=EEG_FS, lf=(4,12), hf=(13,40), win_s=WIN_S)    
+    if args.eeg:
+        EEG_FILES = args.eeg                     # from launcher (can be 1+ files)
+    else:
+        EEG_FILES = ["../eeg_files/fake_eeg_longblocks_calmfirst.txt"]  # fallback
 
-    app = make_app(feeder)
-    _   = start_server(app, host=args.host, port=args.port)
+    EEG_FS = 256.0
+    try:
+        feeder = OfflineEEGFeeder(EEG_FILES, fs=EEG_FS, chunk=32, speed=1.0, loop=True, buffer_s=8.0)
+        clf    = LiveArousalClassifier(fs=EEG_FS, lf=(4,12), hf=(13,40), win_s=4.0)
+    except Exception as e:
+        print("EEG feeder disabled:", e)
+        feeder = None 
+        clf = None
 
-    window = ti.ui.Window("Tetranoise Trace", (WIN, WIN))
+    # ---------------- window / canvas ----------------
+    window = ti.ui.Window("Curl Trace OFFLINE", (WIN, WIN))
     canvas = window.get_canvas()
-    gui    = window.get_gui()  
-
-    need_samples    = int(max(1, EEG_FS * WIN_S)) #samples needed to start the CN
-    tn_initialiazed = False
+    gui    = window.get_gui() 
 
     dt_smooth = 0.001   # start calm
     last_time = time.perf_counter()
     tau_rise  = 0.25       # faster response when stress increases
     tau_fall  = 0.60       # slower when relaxing (feels nicer)
 
+    init_particles()
+    zero_ink()
 
-    #---------- particle generation process starts here -----------
     t = 0.0
     while window.running:
-
-        #only start particles when i have enough data in the buffer...
-        buffered = len(feeder.buf)  # LiveEEGStreamFeeder exposes .buf (deque)
-        has_enough = buffered >= need_samples
-
-        if not has_enough:
-            # Not enough data -> show blue background, no sim/easing
-            gui.text(f"Live stream on :{args.port}")
-            gui.text(f"Waiting for data… {buffered}/{need_samples} samples")
-            # Paint blue
-            clear_to_blue()
-            canvas.set_image(render_image)
-            window.show()
-            continue
-
-        if not tn_initialiazed: #------ this is the first time i have enough data in the buffer -----
-            init_particles()
-            zero_ink()
-            tn_initialiazed = True
 
         feeder.step_once()
         state, ratio, _ = clf.update(feeder.get_buffer())
@@ -454,17 +425,18 @@ def main():
         real_dt = now - last_time
         last_time = now
 
-        target_dt = map_ratio_to_dt(ratio, 
-                                    r_min=0.1, r_max=20.0,
-                                    dt_min=0.001, dt_max=0.050)
+        target_dt = map_ratio_to_dt(ratio, r_min=0.1, r_max=9.0,
+                                  dt_min=0.001, dt_max=0.050)
+        # Asymmetric smoothing feels good
         tau = tau_rise if target_dt > dt_smooth else tau_fall
-        dt_smooth = exp_smooth(dt_smooth, target_dt, real_dt, tau) #smoothly interpolate 
-        dt_smooth = float(np.clip(dt_smooth, 0.0005, 0.08)) #safety clamp
-        print("dt_smooth ", dt_smooth)
-        advect_and_splat(t, dt_smooth , SPLAT_RADIUS)
+        dt_smooth = exp_smooth(dt_smooth, target_dt, real_dt, tau)
+        # Safety clamp
+        dt_smooth = float(np.clip(dt_smooth, 0.0005, 0.08))
+        #print("Speed smooth:, ", speed_smooth)
+        print("dt ", dt_smooth )
+        advect_and_splat(t, dt_smooth, SPLAT_RADIUS)
         decay_and_diffuse(DECAY)
         tonemap()
-
         canvas.set_image(rgb)                     # draw trail image
         # optional: overlay particles for sparkle
         # canvas.circles(pos, radius=0.0025, color=(1.0, 1.0, 1.0))
@@ -475,7 +447,6 @@ def main():
         with gui.sub_window("Readout", 0.70, 0.02, 0.27, 0.12):
             gui.text(f"State: {state}  |  HF/LF: {ratio:.3f}" if ratio == ratio else f"State: {state}")
             #.text(f"target_speed: {target_speed:.3f}  ->  speed: {speed:.3f}")
-
 
 
 if __name__ == "__main__":
