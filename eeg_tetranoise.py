@@ -250,12 +250,12 @@ def zero_ink():
         ink[I] = 0.0
 
 @ti.kernel
-def advect_and_splat(t: ti.f32, dt: ti.f32, splat_r: ti.f32):
+def advect_and_splat(t: ti.f32, dt: ti.f32, splat_r: ti.f32, speed: ti.f32):
     for i in range(NUM_PARTICLES):
         p = pos[i]
         v = curl_from_tetra(pos[i], t, 3.0)
         prev_pos[i] = p
-        p += v * dt * PARTICLE_SPEED
+        p += v * dt * speed #<- per-frame speed mapped from dt
 
         # wrap-around to keep particles inside domain
         for k in ti.static(range(2)):
@@ -343,25 +343,25 @@ def smoothstep01(x: float) -> float:
     # cubic smoothstep in [0,1]
     return x*x*(3.0 - 2.0*x)
 
-def map_ratio_to_speed(ratio: float,
-                       r_min: float = 0.1,   # ratio giving min speed
-                       r_max: float = 2.0,   # ratio giving max speed (your “EXTREME-STRESS” boundary)
-                       v_min: float = 0.016, # min speed at r_min
-                       v_max: float = 0.050  # max speed at r_max (matches your dict)
-                       ) -> float:
+def map_speed_to_dt(dt: float,
+                    dt_min: float = 0.0005,  # your clamp lower bound
+                    dt_max: float = 0.050,   # your clamp upper bound
+                    v_min: float  = 0.05,    # calm speed multiplier
+                    v_max: float  = 0.60,    # stressed speed multiplier
+                    use_smoothstep: bool = True) -> float:
     """
-    Log-space mapping with smoothstep:
-      - compresses very large ratios (more perceptual)
-      - gentle near endpoints
+    Map the current (smoothed) dt to a particle speed
+    Larger dt -> larger speed (monotonic).
+    Tune v_min/v_max to taste.
     """
-    # guard
-    if not np.isfinite(ratio) or ratio <= 0:
+    if not np.isfinite(dt):
         return v_min
-    # normalize in log space
-    x = (np.log(ratio) - np.log(r_min)) / (np.log(r_max) - np.log(r_min))
+    x = (dt - dt_min) / (dt_max - dt_min)
     x = float(np.clip(x, 0.0, 1.0))
-    x = smoothstep01(x)
+    if use_smoothstep:
+        x = smoothstep01(x)
     return v_min + (v_max - v_min) * x
+
 
 def map_ratio_to_dt(ratio: float,
                        r_min: float = 1.0,   # ratio giving min speed
@@ -416,6 +416,13 @@ def main():
     canvas = window.get_canvas()
     gui    = window.get_gui()  
 
+    #ADDING GUI CONTROLS TO TUNE THE PARAMETERS
+    dt_gui_min = 0.0005
+    dt_gui_max = 0.050
+    v_min_gui  = 0.05     # calm multiplier (raise if motion too subtle)
+    v_max_gui  = 0.30     # stressed multiplier (raise for punchier motion)
+    invert_map = False    # larger dt => slower if True
+
     need_samples    = int(max(1, EEG_FS * WIN_S)) #samples needed to start the CN
     tn_initialiazed = False
 
@@ -428,7 +435,6 @@ def main():
     #---------- particle generation process starts here -----------
     t = 0.0
     while window.running:
-
         #only start particles when i have enough data in the buffer...
         buffered = len(feeder.buf)  # LiveEEGStreamFeeder exposes .buf (deque)
         has_enough = buffered >= need_samples
@@ -454,26 +460,47 @@ def main():
         real_dt = now - last_time
         last_time = now
 
+
+        with gui.sub_window("Controls", 0.02, 0.02, 0.34, 0.30):
+            gui.text("Speed mapping (dt -> speed)")
+            # Clamp so min <= max
+            v_min_gui = gui.slider_float("v_min", v_min_gui, 0.00, 1.50)
+            v_max_gui = gui.slider_float("v_max", v_max_gui, 0.01, 2.50)
+            if v_max_gui < v_min_gui:
+                v_max_gui = v_min_gui + 1e-4
+
+            dt_gui_min = gui.slider_float("dt_min", dt_gui_min, 0.0001, 0.0100)
+            dt_gui_max = gui.slider_float("dt_max", dt_gui_max, 0.0100, 0.0800)
+            if dt_gui_max <= dt_gui_min:
+                dt_gui_max = dt_gui_min + 1e-4
+
+            gui.text("Tip: raise v_min if calm looks too static.")
+
+
         target_dt = map_ratio_to_dt(ratio, 
-                                    r_min=0.1, r_max=20.0,
+                                    r_min=0.1,    r_max=20.0,
                                     dt_min=0.001, dt_max=0.050)
         tau = tau_rise if target_dt > dt_smooth else tau_fall
         dt_smooth = exp_smooth(dt_smooth, target_dt, real_dt, tau) #smoothly interpolate 
         dt_smooth = float(np.clip(dt_smooth, 0.0005, 0.08)) #safety clamp
-        print("dt_smooth ", dt_smooth)
-        advect_and_splat(t, dt_smooth , SPLAT_RADIUS)
+        speed = map_speed_to_dt(dt_smooth,
+                                dt_min=dt_gui_min, dt_max=dt_gui_max,
+                                v_min=v_min_gui,   v_max=v_max_gui)
+                
+        advect_and_splat(t, dt_smooth , SPLAT_RADIUS, speed)
         decay_and_diffuse(DECAY)
         tonemap()
 
-        canvas.set_image(rgb)                     # draw trail image
-        # optional: overlay particles for sparkle
+        canvas.set_image(rgb) # draw trail image
+        # experimental: overlay particles for sparkle
         # canvas.circles(pos, radius=0.0025, color=(1.0, 1.0, 1.0))
 
         window.show()
         t += 0.01
 
         with gui.sub_window("Readout", 0.70, 0.02, 0.27, 0.12):
-            gui.text(f"State: {state}  |  HF/LF: {ratio:.3f}" if ratio == ratio else f"State: {state}")
+            gui.text(f"State: {state}  |  HF/LF: {ratio:.3f}")
+            gui.text(f"speed: {speed:.3f}  |  dt:    {dt_smooth:.4f}"  )
             #.text(f"target_speed: {target_speed:.3f}  ->  speed: {speed:.3f}")
 
 

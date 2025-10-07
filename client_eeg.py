@@ -136,7 +136,7 @@ def main():
     print(f"Streaming to {url} at fs={args.fs} Hz, chunk={args.chunk} samples... (Ctrl-C to stop)")
 
 
-    samples_all = get_past_data(800)
+    samples_all = get_past_data(24)
     # Real-time pacing
     chunk_period = args.chunk / args.fs  # seconds per chunk
     next_send = time.perf_counter() + chunk_period
