@@ -353,7 +353,7 @@ def map_ratio_to_speed(ratio: float,
 
 
 def map_ratio_to_dt(ratio: float,
-                       r_min: float = 0.1,   # ratio giving min speed
+                       r_min: float = 0.1,    # ratio giving min speed
                        r_max: float = 10.0,   # ratio giving max speed (your “EXTREME-STRESS” boundary)
                        dt_min: float = 0.016, # min speed at r_min
                        dt_max: float = 0.050  # max speed at r_max (matches your dict)
@@ -421,9 +421,9 @@ def main():
 
         feeder.step_once()
         state, ratio, _ = clf.update(feeder.get_buffer())
-        now = time.perf_counter()
-        real_dt = now - last_time
-        last_time = now
+        now             = time.perf_counter()
+        real_dt         = now - last_time
+        last_time       = now
 
         target_dt = map_ratio_to_dt(ratio, r_min=0.1, r_max=9.0,
                                   dt_min=0.001, dt_max=0.050)
