@@ -1,6 +1,16 @@
 # Curl Trace in Taichi
 # - trying out tetranoise function #inspired from https://www.shadertoy.com/view/mlsSWH
 
+
+
+"""
+OBS!!!!
+need to implement the "accumulation" of an emotion
+otherwise shifts between states are too quick and not 
+perceivable
+!!!
+"""
+
 import taichi as ti
 import math, random
 
@@ -146,7 +156,7 @@ def tetranoise(p: vec3) -> ti.f32:
     d = vec3(p.dot(g0), p1.dot(g1), p2.dot(g2))  # first 3
     d4 = p3.dot(g3)
 
-    # Combine (v^3 * 8) like your GLSL; scale and bias into [0,1]
+    # Combine (v^3 * 8) like GLSL; scale and bias into [0,1]
     w0 = v0 * v0 * v0 * 8.0
     w1 = v1 * v1 * v1 * 8.0
     w2 = v2 * v2 * v2 * 8.0
@@ -169,7 +179,7 @@ def fbm(p: vec2, octaves: int) -> ti.f32:
 # ---------------- fBm (3D) ----------------
 @ti.func
 def fbm3(p: vec3, octaves: ti.i32) -> ti.f32:
-    # Your GLSL used 3 octaves with offsets cycling yzx
+    # GLSL used 3 octaves with offsets cycling yzx
     n = 0.0
     s = 0.0
     amp = 1.0
@@ -410,8 +420,8 @@ def main():
 
     dt_smooth = 0.001   # start calm
     last_time = time.perf_counter()
-    tau_rise  = 0.25       # faster response when stress increases
-    tau_fall  = 0.60       # slower when relaxing (feels nicer)
+    tau_rise  = 0.35       # faster response when stress increases
+    tau_fall  = 0.40       # slower when relaxing (feels nicer)
 
     init_particles()
     zero_ink()
@@ -425,7 +435,7 @@ def main():
         real_dt         = now - last_time
         last_time       = now
 
-        target_dt = map_ratio_to_dt(ratio, r_min=0.1, r_max=9.0,
+        target_dt = map_ratio_to_dt(ratio, r_min=1.2, r_max=9.0,
                                   dt_min=0.001, dt_max=0.050)
         # Asymmetric smoothing feels good
         tau = tau_rise if target_dt > dt_smooth else tau_fall
@@ -444,10 +454,12 @@ def main():
         window.show()
         t += 0.01
 
+        # ================ GUI ====================
+        ''' #remove when recording screen for testingggg
         with gui.sub_window("Readout", 0.70, 0.02, 0.27, 0.12):
             gui.text(f"State: {state}  |  HF/LF: {ratio:.3f}" if ratio == ratio else f"State: {state}")
             #.text(f"target_speed: {target_speed:.3f}  ->  speed: {speed:.3f}")
-
+        '''
 
 if __name__ == "__main__":
     main()
